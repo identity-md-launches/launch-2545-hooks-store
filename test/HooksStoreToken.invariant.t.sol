@@ -5,6 +5,9 @@ import {Test} from "forge-std/Test.sol";
 import {HooksStoreToken} from "../src/HooksStoreToken.sol";
 import {TokenHandler} from "./helpers/TokenHandler.sol";
 
+/// forge-config: default.invariant.runs = 256
+/// forge-config: default.invariant.depth = 128
+/// forge-config: default.invariant.fail-on-revert = true
 contract HooksStoreTokenInvariantTest is Test {
     uint256 private constant SUPPLY = 1_000_000_000_000_000_000_000_000_000;
 
@@ -18,12 +21,43 @@ contract HooksStoreTokenInvariantTest is Test {
         handler = new TokenHandler(token, actors);
         assertTrue(token.transfer(actors[0], SUPPLY));
 
-        bytes4[] memory selectors = new bytes4[](3);
+        bytes4[] memory selectors = new bytes4[](5);
         selectors[0] = TokenHandler.transfer.selector;
         selectors[1] = TokenHandler.approve.selector;
         selectors[2] = TokenHandler.transferFrom.selector;
+        selectors[3] = TokenHandler.approveBoundary.selector;
+        selectors[4] = TokenHandler.transferFromBoundary.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
+    }
+
+    function test_handlerReplaysExhaustionFailureAndRefill() public {
+        // Approve one wei and fail to spend two. The failed call must not consume it.
+        handler.approveBoundary(0, 1, 1, 0);
+        handler.transferFromBoundary(0, 2, 1, 2, 0);
+        assertEq(token.allowance(actors[0], actors[1]), 1);
+        invariant_balancesAndAllowancesMatchIndependentLedger();
+        invariant_supplyIsFixedAndAllTokensAreAccountedFor();
+
+        handler.transferFromBoundary(0, 2, 1, 1, 0);
+        assertEq(token.balanceOf(actors[2]), 1);
+        assertEq(token.allowance(actors[0], actors[1]), 0);
+        handler.transferFromBoundary(0, 2, 1, 2, 0);
+        invariant_balancesAndAllowancesMatchIndependentLedger();
+        invariant_supplyIsFixedAndAllTokensAreAccountedFor();
+
+        // Refill the budget with an infinite approval, then revoke it after spending.
+        handler.approveBoundary(0, 1, 4, 0);
+        handler.transferFromBoundary(0, 2, 1, 1, 0);
+        assertEq(token.balanceOf(actors[2]), SUPPLY);
+        assertEq(token.allowance(actors[0], actors[1]), type(uint256).max);
+        handler.approveBoundary(0, 1, 0, 0);
+        handler.transfer(2, 0, SUPPLY);
+        handler.transferFromBoundary(0, 2, 1, 2, 0);
+        assertEq(token.balanceOf(actors[0]), SUPPLY);
+        assertEq(token.allowance(actors[0], actors[1]), 0);
+        invariant_balancesAndAllowancesMatchIndependentLedger();
+        invariant_supplyIsFixedAndAllTokensAreAccountedFor();
     }
 
     function invariant_supplyIsFixedAndAllTokensAreAccountedFor() public view {

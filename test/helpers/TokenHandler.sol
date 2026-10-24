@@ -8,6 +8,8 @@ import {HooksStoreToken} from "../../src/HooksStoreToken.sol";
 /// @dev Test-only independent ledger. Actions include insufficient funds, missing approval,
 /// zero recipients, self-transfers, and finite/infinite allowances in arbitrary sequences.
 contract TokenHandler is Test {
+    uint256 private constant SUPPLY = 1_000_000_000 * 10 ** 18;
+
     HooksStoreToken private immutable token;
     address[4] private actors;
     mapping(address => uint256) public expectedBalance;
@@ -16,7 +18,7 @@ contract TokenHandler is Test {
     constructor(HooksStoreToken token_, address[4] memory actors_) {
         token = token_;
         actors = actors_;
-        expectedBalance[actors_[0]] = token_.totalSupply();
+        expectedBalance[actors_[0]] = SUPPLY;
     }
 
     function transfer(uint256 fromSeed, uint256 toSeed, uint256 amountSeed) external {
@@ -35,7 +37,7 @@ contract TokenHandler is Test {
         }
     }
 
-    function approve(uint256 ownerSeed, uint256 spenderSeed, uint256 amount) external {
+    function approve(uint256 ownerSeed, uint256 spenderSeed, uint256 amount) public {
         address owner = actors[ownerSeed % actors.length];
         address spender = _recipient(spenderSeed);
 
@@ -48,11 +50,56 @@ contract TokenHandler is Test {
         }
     }
 
+    /// @dev Keep unrestricted approvals above, but also frequently create revocations,
+    /// spendable finite budgets, and the two sides of the infinite-allowance boundary.
+    function approveBoundary(uint256 ownerSeed, uint256 spenderSeed, uint8 kind, uint256 amountSeed) external {
+        uint256 balance = expectedBalance[actors[ownerSeed % actors.length]];
+        uint256 mode = kind % 7;
+        uint256 amount;
+        if (mode == 0) amount = 0;
+        else if (mode == 1) amount = 1;
+        else if (mode == 2) amount = balance;
+        else if (mode == 3) amount = balance + 1;
+        else if (mode == 4) amount = type(uint256).max;
+        else if (mode == 5) amount = type(uint256).max - 1;
+        else amount = bound(amountSeed, 0, SUPPLY);
+
+        approve(ownerSeed, spenderSeed % actors.length, amount);
+    }
+
     function transferFrom(uint256 ownerSeed, uint256 toSeed, uint256 spenderSeed, uint256 amountSeed) external {
         address owner = actors[ownerSeed % actors.length];
         address to = _recipient(toSeed);
         address spender = actors[spenderSeed % actors.length];
         uint256 amount = bound(amountSeed, 0, expectedBalance[owner] + 1);
+        _transferFrom(owner, to, spender, amount);
+    }
+
+    /// @dev Exhaust the current budget or exceed it by exactly one, regardless of
+    /// previous randomized actions. No new approval is issued before the spend.
+    function transferFromBoundary(
+        uint256 ownerSeed,
+        uint256 toSeed,
+        uint256 spenderSeed,
+        uint8 kind,
+        uint256 amountSeed
+    ) external {
+        address owner = actors[ownerSeed % actors.length];
+        address spender = actors[spenderSeed % actors.length];
+        uint256 limit = expectedBalance[owner];
+        if (expectedAllowance[owner][spender] < limit) limit = expectedAllowance[owner][spender];
+        uint256 mode = kind % 5;
+        uint256 amount;
+        if (mode == 0) amount = 0;
+        else if (mode == 1) amount = limit;
+        else if (mode == 2) amount = limit + 1;
+        else if (mode == 3) amount = type(uint256).max;
+        else amount = bound(amountSeed, 0, limit);
+
+        _transferFrom(owner, _recipient(toSeed), spender, amount);
+    }
+
+    function _transferFrom(address owner, address to, address spender, uint256 amount) private {
         uint256 approved = expectedAllowance[owner][spender];
         bool shouldSucceed = to != address(0) && amount <= expectedBalance[owner] && amount <= approved;
 
